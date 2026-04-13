@@ -234,6 +234,7 @@ def build_training_args(
         bf16                        = True,
         push_to_hub                 = False,
         report_to                   = "none",
+        max_grad_norm               = 0.3,
     )
 
 
@@ -272,24 +273,39 @@ def run_experiment(
     compute_metrics = make_compute_metrics(tokenizer)
     output_dir      = training_args.output_dir
 
-    # TRL 버전에 따라 파라미터명이 다름
-    # 0.13 미만: max_seq_length / 0.13 이상: max_length
-    import trl as _trl
+    # ── TRL 버전 호환 SFTTrainer 초기화 ──────────────────────────
+    # TRL 1.1.0+: tokenizer → processing_class, max_seq_length 제거
+    #             대신 TrainingArguments에 max_length 설정
+    # TRL 0.x   : tokenizer, max_seq_length 파라미터 사용
     import inspect as _inspect
     _sft_params = _inspect.signature(SFTTrainer.__init__).parameters
-    _seq_len_key = "max_seq_length" if "max_seq_length" in _sft_params else "max_length"
 
-    trainer = SFTTrainer(
-        model              = model,
-        train_dataset      = datasets["train"],
-        eval_dataset       = datasets["eval"],
-        **{_seq_len_key: TRAIN_DEFAULTS["max_seq_length"]},
-        tokenizer          = tokenizer,
-        dataset_text_field = "text",
-        args               = training_args,
-        compute_metrics    = compute_metrics,
-        callbacks          = [ProgressCallback(peft_name)],
-    )
+    if "processing_class" in _sft_params:
+        # TRL 1.1.0 이상
+        # max_seq_length는 data_collator로 제어하거나 tokenizer에서 설정
+        tokenizer.model_max_length = TRAIN_DEFAULTS["max_seq_length"]
+        trainer = SFTTrainer(
+            model             = model,
+            train_dataset     = datasets["train"],
+            eval_dataset      = datasets["eval"],
+            processing_class  = tokenizer,
+            args              = training_args,
+            compute_metrics   = compute_metrics,
+            callbacks         = [ProgressCallback(peft_name)],
+        )
+    else:
+        # TRL 0.x
+        trainer = SFTTrainer(
+            model              = model,
+            train_dataset      = datasets["train"],
+            eval_dataset       = datasets["eval"],
+            max_seq_length     = TRAIN_DEFAULTS["max_seq_length"],
+            tokenizer          = tokenizer,
+            dataset_text_field = "text",
+            args               = training_args,
+            compute_metrics    = compute_metrics,
+            callbacks          = [ProgressCallback(peft_name)],
+        )
 
     trainer.train()
 
