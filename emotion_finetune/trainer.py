@@ -272,16 +272,23 @@ def run_experiment(
     compute_metrics = make_compute_metrics(tokenizer)
     output_dir      = training_args.output_dir
 
+    # TRL 버전에 따라 파라미터명이 다름
+    # 0.13 미만: max_seq_length / 0.13 이상: max_length
+    import trl as _trl
+    import inspect as _inspect
+    _sft_params = _inspect.signature(SFTTrainer.__init__).parameters
+    _seq_len_key = "max_seq_length" if "max_seq_length" in _sft_params else "max_length"
+
     trainer = SFTTrainer(
         model              = model,
         train_dataset      = datasets["train"],
         eval_dataset       = datasets["eval"],
-        max_seq_length     = TRAIN_DEFAULTS["max_seq_length"],
+        **{_seq_len_key: TRAIN_DEFAULTS["max_seq_length"]},
         tokenizer          = tokenizer,
         dataset_text_field = "text",
         args               = training_args,
         compute_metrics    = compute_metrics,
-        callbacks          = [ProgressCallback(peft_name)],  # ← 콜백 등록
+        callbacks          = [ProgressCallback(peft_name)],
     )
 
     trainer.train()

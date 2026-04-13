@@ -39,7 +39,7 @@ def load_base_model(
     model      : 양자화된 CausalLM (gradient_checkpointing 활성화)
     tokenizer  : 패딩 토큰 설정 완료
     """
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     tokenizer.pad_token    = tokenizer.eos_token
     tokenizer.padding_side = "right"
 
@@ -54,6 +54,7 @@ def load_base_model(
         model_id,
         quantization_config = bnb_config,
         device_map          = "auto",
+        trust_remote_code   = True,
     )
 
     # kbit 학습 준비 (순서 고정: enable → prepare)
