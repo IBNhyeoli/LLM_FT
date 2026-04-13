@@ -39,7 +39,7 @@ def load_base_model(
     model      : 양자화된 CausalLM (gradient_checkpointing 활성화)
     tokenizer  : 패딩 토큰 설정 완료
     """
-    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
     tokenizer.pad_token    = tokenizer.eos_token
     tokenizer.padding_side = "right"
 
@@ -54,7 +54,6 @@ def load_base_model(
         model_id,
         quantization_config = bnb_config,
         device_map          = "auto",
-        trust_remote_code   = True,
     )
 
     # kbit 학습 준비 (순서 고정: enable → prepare)
@@ -99,14 +98,36 @@ def get_ia3_config() -> IA3Config:
     )
 
 
+def _patch_exaone_embeddings(model):
+    """
+    EXAONE 모델은 get_input_embeddings()가 미구현 상태라
+    PEFT 어댑터 주입 시 NotImplementedError가 발생함.
+    transformer.wte 레이어를 직접 반환하도록 패치.
+    """
+    try:
+        wte = model.transformer.wte          # EXAONE 임베딩 레이어
+        model.get_input_embeddings  = lambda: wte
+        model.set_input_embeddings  = lambda emb: setattr(model.transformer, "wte", emb)
+        # base_model 래퍼에도 동일하게 적용 (kbit 준비 후 구조 변경 대비)
+        if hasattr(model, "model") and hasattr(model.model, "transformer"):
+            inner_wte = model.model.transformer.wte
+            model.model.get_input_embeddings = lambda: inner_wte
+        print("[model] EXAONE embedding 패치 완료")
+    except AttributeError as e:
+        print(f"[model] 패치 스킵 (레이어 미발견): {e}")
+
+
 def apply_peft(base_model, peft_config):
     """
     베이스 모델에 PEFT 어댑터를 적용하고 학습 가능 파라미터 수를 출력.
+
+    EXAONE 모델의 get_input_embeddings 미구현 문제를 패치한 후 적용.
 
     Returns
     -------
     peft_model : PEFT 어댑터가 적용된 모델
     """
+    _patch_exaone_embeddings(base_model)
     peft_model = get_peft_model(base_model, peft_config)
     peft_model.print_trainable_parameters()
     return peft_model
