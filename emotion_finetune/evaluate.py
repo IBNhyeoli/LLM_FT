@@ -91,7 +91,9 @@ def make_compute_metrics(tokenizer):
             return {"accuracy": 0.0, "f1_macro": 0.0, "kappa": 0.0}
 
         pv, tv = p[valid], t[valid]
-        kappa  = cohen_kappa_score(tv, pv) if len(np.unique(tv)) > 1 else 0.0
+        # 정답과 예측 모두 2개 이상 클래스가 있어야 Kappa 계산 가능
+        all_labels = np.concatenate([tv, pv])
+        kappa = cohen_kappa_score(tv, pv) if len(np.unique(all_labels)) > 1 else 0.0
 
         return {
             "accuracy": float(accuracy_score(tv, pv)),
