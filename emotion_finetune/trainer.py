@@ -279,10 +279,10 @@ def run_experiment(
     tokenizer.model_max_length = TRAIN_DEFAULTS["max_seq_length"]
 
     def formatting_func(example):
-        """Dataset의 'text' 컬럼을 그대로 반환"""
+        """Dataset의 'text' 컬럼을 문자열로 반환 (TRL 1.1.0 요구사항)"""
         if isinstance(example["text"], list):
-            return example["text"]
-        return [example["text"]]
+            return example["text"][0]
+        return example["text"]
 
     trainer = SFTTrainer(
         model            = model,
