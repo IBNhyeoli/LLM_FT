@@ -6,6 +6,11 @@ trainer.py
 - ProgressCallback      : 에폭/스텝 진행도 + 예상 대기 시간 출력
 - build_training_args   : TrainingArguments 생성
 - run_experiment        : PEFT 적용 → 학습 → 평가 → 저장
+
+TRL 1.1.0 + transformers 5.x 호환 변경사항
+------------------------------------------
+- SFTTrainer: processing_class + formatting_func 방식 사용
+- TrainingArguments: gradient_checkpointing=False, remove_unused_columns=False
 """
 
 import os
@@ -54,34 +59,21 @@ class ProgressCallback(TrainerCallback):
         self.total_steps      = 0
         self.steps_per_epoch  = 0
 
-    # ── 내부 헬퍼 ──────────────────────────────────────────────
-
     @staticmethod
     def _fmt(seconds: float) -> str:
-        """초 → MM:SS 문자열"""
         seconds = max(0, int(seconds))
         return f"{seconds // 60:02d}:{seconds % 60:02d}"
 
     def _avg_step_time(self) -> float:
-        """최근 20스텝 평균 소요 시간(초)"""
         recent = self.step_times[-20:]
         return sum(recent) / len(recent) if recent else 0.0
 
     @staticmethod
     def _bar(ratio: float, width: int = 20) -> str:
-        """비율(0~1) → ASCII 진행 바"""
         filled = int(ratio * width)
         return "[" + "█" * filled + "░" * (width - filled) + "]"
 
-    # ── 콜백 훅 ────────────────────────────────────────────────
-
-    def on_train_begin(
-        self,
-        args: TrainingArguments,
-        state: TrainerState,
-        control: TrainerControl,
-        **kwargs,
-    ):
+    def on_train_begin(self, args, state, control, **kwargs):
         self.train_start     = time.time()
         self.total_steps     = state.max_steps
         self.steps_per_epoch = math.ceil(
@@ -96,31 +88,18 @@ class ProgressCallback(TrainerCallback):
         )
         print(f"{'━'*64}\n")
 
-    def on_epoch_begin(
-        self,
-        args: TrainingArguments,
-        state: TrainerState,
-        control: TrainerControl,
-        **kwargs,
-    ):
+    def on_epoch_begin(self, args, state, control, **kwargs):
         self.epoch_start    = time.time()
         self.last_step_time = time.time()
         epoch_num = int(state.epoch) + 1
         print(f"\n  ── Epoch {epoch_num}/{int(args.num_train_epochs)} 시작 ──")
 
-    def on_step_end(
-        self,
-        args: TrainingArguments,
-        state: TrainerState,
-        control: TrainerControl,
-        **kwargs,
-    ):
+    def on_step_end(self, args, state, control, **kwargs):
         now      = time.time()
         step_sec = now - (self.last_step_time or now)
         self.last_step_time = now
         self.step_times.append(step_sec)
 
-        # logging_steps 주기에만 출력
         if state.global_step % args.logging_steps != 0:
             return
 
@@ -130,12 +109,9 @@ class ProgressCallback(TrainerCallback):
         total_ep      = int(args.num_train_epochs)
         step_in_epoch = cur_step % self.steps_per_epoch or self.steps_per_epoch
         total_ratio   = cur_step / max(self.total_steps, 1)
-
-        # ETA
         eta_total_sec = avg_step * (self.total_steps - cur_step)
         eta_epoch_sec = avg_step * (self.steps_per_epoch - step_in_epoch)
 
-        # Loss
         loss_str = ""
         if state.log_history:
             last_log = state.log_history[-1]
@@ -153,13 +129,7 @@ class ProgressCallback(TrainerCallback):
             f"전체 ETA {self._fmt(eta_total_sec)}"
         )
 
-    def on_epoch_end(
-        self,
-        args: TrainingArguments,
-        state: TrainerState,
-        control: TrainerControl,
-        **kwargs,
-    ):
+    def on_epoch_end(self, args, state, control, **kwargs):
         elapsed       = time.time() - (self.epoch_start or time.time())
         epoch_num     = int(state.epoch)
         total_ep      = int(args.num_train_epochs)
@@ -172,7 +142,6 @@ class ProgressCallback(TrainerCallback):
             f"남은 에폭 ETA {self._fmt(eta_remaining)}"
         )
 
-        # 평가 지표 출력
         if state.log_history:
             last    = state.log_history[-1]
             metrics = {
@@ -184,13 +153,7 @@ class ProgressCallback(TrainerCallback):
                 metric_str = "  ".join(f"{k}={v:.4f}" for k, v in metrics.items())
                 print(f"    {metric_str}")
 
-    def on_train_end(
-        self,
-        args: TrainingArguments,
-        state: TrainerState,
-        control: TrainerControl,
-        **kwargs,
-    ):
+    def on_train_end(self, args, state, control, **kwargs):
         total_elapsed = time.time() - (self.train_start or time.time())
         print(f"\n{'━'*64}")
         print(f"  [{self.name}] 학습 완료")
@@ -216,7 +179,6 @@ def build_training_args(
 ) -> TrainingArguments:
     """
     실험별 출력 디렉터리를 자동 생성하는 TrainingArguments 반환.
-    인자를 직접 넘겨 학습 조건을 유연하게 변경 가능.
     """
     output_dir = os.path.join(OUTPUT_ROOT, experiment_name.replace(" ", "_"))
     return TrainingArguments(
@@ -235,6 +197,8 @@ def build_training_args(
         push_to_hub                 = False,
         report_to                   = "none",
         max_grad_norm               = 0.3,
+        gradient_checkpointing      = False,   # EXAONE 미지원
+        remove_unused_columns       = False,   # formatting_func 사용 시 필수
     )
 
 
@@ -266,20 +230,19 @@ def run_experiment(
     -------
     dict : 실험 평가 결과 {experiment, accuracy, f1_macro, kappa, ...}
     """
-    # PEFT 어댑터 적용
     model = apply_peft(base_model, peft_config)
 
     training_args   = build_training_args(peft_name, num_train_epochs=num_train_epochs)
     compute_metrics = make_compute_metrics(tokenizer)
     output_dir      = training_args.output_dir
 
-    # ── TRL 1.1.0 + transformers 5.x 기준 SFTTrainer 초기화 ──────
-    # formatting_func 으로 데이터를 전달하고
-    # processing_class 로 토크나이저를 전달하는 방식 사용
+    # ── TRL 1.1.0 + transformers 5.x SFTTrainer 초기화 ──────────
+    # processing_class : 토크나이저 전달
+    # formatting_func  : Dataset의 "text" 컬럼을 문자열로 반환
     tokenizer.model_max_length = TRAIN_DEFAULTS["max_seq_length"]
 
     def formatting_func(example):
-        """Dataset의 'text' 컬럼을 문자열로 반환 (TRL 1.1.0 요구사항)"""
+        """text 컬럼을 문자열로 반환 (TRL 1.1.0 요구사항)"""
         if isinstance(example["text"], list):
             return example["text"][0]
         return example["text"]
@@ -302,7 +265,7 @@ def run_experiment(
         os.path.join(output_dir, "train_log.csv"), index=False
     )
 
-    # 최종 상세 평가
+    # 최종 평가
     result = run_final_evaluation(trainer, datasets["eval"], tokenizer, peft_name)
 
     # 어댑터 저장
@@ -310,7 +273,7 @@ def run_experiment(
     tokenizer.save_pretrained(output_dir)
     print(f"  어댑터 저장: {output_dir}")
 
-    # GPU 메모리 정리 (연속 실험 대비)
+    # GPU 메모리 정리
     del model
     torch.cuda.empty_cache()
 

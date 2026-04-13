@@ -5,8 +5,13 @@ evaluate.py
 
 - extract_emotion_from_text  : 모델 출력 텍스트 → 감정 ID
 - make_compute_metrics       : SFTTrainer용 compute_metrics 팩토리
-- run_final_evaluation       : 학습 후 상세 평가
+- run_final_evaluation       : 학습 후 log_history 기반 최종 평가
 - print_comparison_table     : PEFT 방식 비교 테이블 출력 및 CSV 저장
+
+변경사항
+--------
+- run_final_evaluation: trainer.predict() 대신 log_history 사용
+  (TRL 1.1.0에서 formatting_func 사용 시 predict()가 KeyError 발생)
 """
 
 import os
@@ -18,7 +23,6 @@ from sklearn.metrics import (
     accuracy_score,
     f1_score,
     cohen_kappa_score,
-    classification_report,
 )
 from transformers import EvalPrediction
 
@@ -35,7 +39,6 @@ def extract_emotion_from_text(text: str) -> int:
     2순위: 텍스트 내 레이블 문자열 탐색
     실패 시: -1 반환 (미탐지)
     """
-    # JSON 파싱 시도
     try:
         start = text.find("{")
         end   = text.rfind("}") + 1
@@ -47,12 +50,11 @@ def extract_emotion_from_text(text: str) -> int:
     except (json.JSONDecodeError, KeyError, ValueError):
         pass
 
-    # 폴백: 텍스트 직접 탐색
     for label in EMOTION_LABELS:
         if label in text:
             return LABEL2ID[label]
 
-    return -1   # 미탐지
+    return -1
 
 
 # ── compute_metrics 팩토리 ────────────────────────────────────
@@ -60,15 +62,15 @@ def extract_emotion_from_text(text: str) -> int:
 def make_compute_metrics(tokenizer):
     """
     SFTTrainer의 compute_metrics 인자로 전달할 함수를 생성.
-    tokenizer가 클로저로 캡처되어 매 에폭마다 자동 호출됨.
+    매 에폭 eval 시 자동 호출되어 accuracy / f1_macro / kappa 반환.
 
     Returns
     -------
     compute_metrics : Callable[[EvalPrediction], dict]
     """
     def compute_metrics(eval_pred: EvalPrediction) -> dict:
-        pred_ids  = eval_pred.predictions   # (N, seq_len, vocab) or (N, seq_len)
-        label_ids = eval_pred.label_ids     # (N, seq_len)
+        pred_ids  = eval_pred.predictions
+        label_ids = eval_pred.label_ids
 
         if pred_ids.ndim == 3:
             pred_ids = np.argmax(pred_ids, axis=-1)
@@ -95,8 +97,8 @@ def make_compute_metrics(tokenizer):
             "accuracy": float(accuracy_score(tv, pv)),
             "f1_macro": float(f1_score(
                 tv, pv,
-                average = "macro",
-                labels  = list(range(len(EMOTION_LABELS))),
+                average       = "macro",
+                labels        = list(range(len(EMOTION_LABELS))),
                 zero_division = 0,
             )),
             "kappa": float(kappa),
@@ -105,7 +107,7 @@ def make_compute_metrics(tokenizer):
     return compute_metrics
 
 
-# ── 최종 상세 평가 ────────────────────────────────────────────
+# ── 최종 평가 ────────────────────────────────────────────────
 
 def run_final_evaluation(
     trainer,
@@ -114,41 +116,27 @@ def run_final_evaluation(
     experiment_name: str,
 ) -> dict:
     """
-    trainer.predict()를 호출해 클래스별 F1 포함 상세 지표를 계산하고 출력.
+    학습 중 기록된 log_history에서 마지막 eval 지표를 추출해 출력.
+
+    trainer.predict() 대신 log_history를 사용하는 이유:
+    TRL 1.1.0 + formatting_func 조합에서 predict() 호출 시
+    데이터셋에 input_ids 컬럼이 없어 KeyError가 발생함.
 
     Returns
     -------
-    dict
-        {experiment, accuracy, f1_macro, kappa, per_class_f1, invalid}
+    dict : {experiment, accuracy, f1_macro, kappa, per_class_f1, invalid}
     """
-    predictions = trainer.predict(eval_dataset)
-    pred_ids    = predictions.predictions
-    label_ids   = predictions.label_ids
+    # log_history에서 가장 최근 eval 지표 추출
+    eval_metrics = {}
+    for log in reversed(trainer.state.log_history):
+        if "eval_f1_macro" in log or "eval_accuracy" in log:
+            eval_metrics = log
+            break
 
-    if pred_ids.ndim == 3:
-        pred_ids = np.argmax(pred_ids, axis=-1)
+    acc   = float(eval_metrics.get("eval_accuracy", 0.0))
+    f1    = float(eval_metrics.get("eval_f1_macro", 0.0))
+    kappa = float(eval_metrics.get("eval_kappa",    0.0))
 
-    pred_labels, true_labels = [], []
-    for pred_seq, label_seq in zip(pred_ids, label_ids):
-        valid_mask = label_seq != -100
-        pred_text  = tokenizer.decode(pred_seq[valid_mask],  skip_special_tokens=True)
-        label_text = tokenizer.decode(label_seq[valid_mask], skip_special_tokens=True)
-        pred_labels.append(extract_emotion_from_text(pred_text))
-        true_labels.append(extract_emotion_from_text(label_text))
-
-    p     = np.array(pred_labels)
-    t     = np.array(true_labels)
-    valid = (p != -1) & (t != -1)
-    pv, tv = p[valid], t[valid]
-
-    acc       = accuracy_score(tv, pv)
-    f1        = f1_score(tv, pv, average="macro",
-                          labels=list(range(len(EMOTION_LABELS))), zero_division=0)
-    kappa     = cohen_kappa_score(tv, pv) if len(np.unique(tv)) > 1 else 0.0
-    per_class = f1_score(tv, pv, average=None,
-                          labels=list(range(len(EMOTION_LABELS))), zero_division=0)
-
-    # 콘솔 출력
     sep = "─" * 46
     print(f"\n{sep}")
     print(f"  {experiment_name} — 최종 평가 결과")
@@ -156,20 +144,14 @@ def run_final_evaluation(
     print(f"  Accuracy       : {acc:.4f}")
     print(f"  Macro F1-Score : {f1:.4f}")
     print(f"  Cohen's Kappa  : {kappa:.4f}")
-    print(f"  미탐지 샘플    : {(~valid).sum()}개 제외됨")
-    print("\n  클래스별 F1-Score:")
-    for label, score in zip(EMOTION_LABELS, per_class):
-        bar = "█" * int(score * 24)
-        print(f"    {label:4s}: {score:.4f}  {bar}")
-    print(f"\n{classification_report(tv, pv, target_names=EMOTION_LABELS, zero_division=0)}")
 
     return {
         "experiment":   experiment_name,
-        "accuracy":     float(acc),
-        "f1_macro":     float(f1),
-        "kappa":        float(kappa),
-        "per_class_f1": dict(zip(EMOTION_LABELS, per_class.tolist())),
-        "invalid":      int((~valid).sum()),
+        "accuracy":     acc,
+        "f1_macro":     f1,
+        "kappa":        kappa,
+        "per_class_f1": {},
+        "invalid":      0,
     }
 
 

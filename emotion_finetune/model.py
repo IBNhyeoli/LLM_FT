@@ -8,6 +8,12 @@ model.py
 - LoRA  : get_lora_config(r, use_dora=False)
 - DoRA  : get_lora_config(r, use_dora=True)
 - IA³   : get_ia3_config()
+
+EXAONE 3.5 호환 패치
+--------------------
+- get_input_embeddings 미구현 → _patch_exaone_embeddings()로 해결
+- gradient_checkpointing 미지원 → use_gradient_checkpointing=False
+- trust_remote_code=True 필요
 """
 
 import torch
@@ -34,12 +40,20 @@ def load_base_model(
     """
     4-bit NF4 양자화 + kbit 학습 준비 상태의 모델과 토크나이저 반환.
 
+    EXAONE 호환 변경사항
+    --------------------
+    - trust_remote_code=True  : EXAONE 커스텀 코드 허용
+    - use_gradient_checkpointing=False : EXAONE이 gradient_checkpointing 미지원
+
     Returns
     -------
-    model      : 양자화된 CausalLM (gradient_checkpointing 활성화)
+    model      : 양자화된 CausalLM
     tokenizer  : 패딩 토큰 설정 완료
     """
-    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_id,
+        trust_remote_code=True,
+    )
     tokenizer.pad_token    = tokenizer.eos_token
     tokenizer.padding_side = "right"
 
@@ -57,12 +71,37 @@ def load_base_model(
         trust_remote_code   = True,
     )
 
-    # kbit 학습 준비 (순서 고정: enable → prepare)
-    model.gradient_checkpointing_enable()
-    model = prepare_model_for_kbit_training(model)
+    # EXAONE은 gradient_checkpointing 미지원 → False로 설정
+    model = prepare_model_for_kbit_training(
+        model,
+        use_gradient_checkpointing=False,
+    )
 
     print(f"[model] 로드 완료: {model_id}")
     return model, tokenizer
+
+
+# ── EXAONE 임베딩 패치 ────────────────────────────────────────
+
+def _patch_exaone_embeddings(model):
+    """
+    EXAONE은 get_input_embeddings()가 미구현 상태라
+    PEFT 어댑터 주입 시 NotImplementedError가 발생함.
+    transformer.wte 레이어를 직접 반환하도록 패치.
+    """
+    try:
+        wte = model.transformer.wte
+        model.get_input_embeddings = lambda: wte
+        model.set_input_embeddings = lambda emb: setattr(
+            model.transformer, "wte", emb
+        )
+        # kbit 래퍼 내부에도 동일하게 적용
+        if hasattr(model, "model") and hasattr(model.model, "transformer"):
+            inner_wte = model.model.transformer.wte
+            model.model.get_input_embeddings = lambda: inner_wte
+        print("[model] EXAONE embedding 패치 완료")
+    except AttributeError as e:
+        print(f"[model] 패치 스킵 (레이어 미발견): {e}")
 
 
 # ── PEFT 설정 팩토리 ──────────────────────────────────────────
@@ -78,7 +117,7 @@ def get_lora_config(r: int = 16, use_dora: bool = False) -> LoraConfig:
     """
     return LoraConfig(
         r              = r,
-        lora_alpha     = r * 2,       # 통상 alpha = 2 × r
+        lora_alpha     = r * 2,
         target_modules = EXAONE_ATTN_MODULES,
         lora_dropout   = 0.05,
         bias           = "none",
@@ -99,30 +138,9 @@ def get_ia3_config() -> IA3Config:
     )
 
 
-def _patch_exaone_embeddings(model):
-    """
-    EXAONE 모델은 get_input_embeddings()가 미구현 상태라
-    PEFT 어댑터 주입 시 NotImplementedError가 발생함.
-    transformer.wte 레이어를 직접 반환하도록 패치.
-    """
-    try:
-        wte = model.transformer.wte          # EXAONE 임베딩 레이어
-        model.get_input_embeddings  = lambda: wte
-        model.set_input_embeddings  = lambda emb: setattr(model.transformer, "wte", emb)
-        # base_model 래퍼에도 동일하게 적용 (kbit 준비 후 구조 변경 대비)
-        if hasattr(model, "model") and hasattr(model.model, "transformer"):
-            inner_wte = model.model.transformer.wte
-            model.model.get_input_embeddings = lambda: inner_wte
-        print("[model] EXAONE embedding 패치 완료")
-    except AttributeError as e:
-        print(f"[model] 패치 스킵 (레이어 미발견): {e}")
-
-
 def apply_peft(base_model, peft_config):
     """
-    베이스 모델에 PEFT 어댑터를 적용하고 학습 가능 파라미터 수를 출력.
-
-    EXAONE 모델의 get_input_embeddings 미구현 문제를 패치한 후 적용.
+    EXAONE 임베딩 패치 적용 후 PEFT 어댑터를 주입.
 
     Returns
     -------
@@ -139,7 +157,6 @@ def apply_peft(base_model, peft_config):
 def get_default_experiments() -> list[tuple[str, object]]:
     """
     기본 PEFT 실험 목록 반환.
-    main.py에서 그대로 사용하거나 원하는 항목만 선택 가능.
 
     Returns
     -------
