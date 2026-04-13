@@ -220,15 +220,16 @@ def build_training_args(
         learning_rate               = learning_rate,
         num_train_epochs            = num_train_epochs,
         logging_steps               = logging_steps,
-        save_strategy               = "no",    # OOM 방지: eval 미실행
-        eval_strategy               = "no",    # eval 중 로짓 누적 → GPU OOM 방지
-        load_best_model_at_end      = False,   # eval_strategy=no 시 비활성화
+        save_strategy               = "epoch",
+        eval_strategy               = "epoch",
+        load_best_model_at_end      = False,   # eval 중 로짓 저장 비활성화로 best model 저장 불가
         bf16                        = True,
         push_to_hub                 = False,
         report_to                   = "none",
         max_grad_norm               = 0.3,
         gradient_checkpointing      = False,   # EXAONE 미지원
         remove_unused_columns       = False,   # formatting_func 사용 시 필수
+        prediction_loss_only        = True,    # eval 중 로짓 저장 안 함 → OOM 방지
     )
 
 

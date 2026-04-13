@@ -118,40 +118,73 @@ def run_final_evaluation(
     experiment_name: str,
 ) -> dict:
     """
-    학습 중 기록된 log_history에서 마지막 eval 지표를 추출해 출력.
+    학습 중 기록된 log_history에서 eval 지표를 추출해 출력.
 
-    trainer.predict() 대신 log_history를 사용하는 이유:
-    TRL 1.1.0 + formatting_func 조합에서 predict() 호출 시
-    데이터셋에 input_ids 컬럼이 없어 KeyError가 발생함.
+    우선순위:
+      1. eval_accuracy / eval_f1_macro / eval_kappa 가 있으면 사용
+      2. 없으면 eval_loss + train 지표(mean_token_accuracy)로 대체 출력
+         - prediction_loss_only=True 설정 시 이 경우에 해당
 
     Returns
     -------
-    dict : {experiment, accuracy, f1_macro, kappa, per_class_f1, invalid}
+    dict : {experiment, accuracy, f1_macro, kappa, eval_loss}
     """
-    # log_history에서 가장 최근 eval 지표 추출
+    # 1순위: compute_metrics 결과
     eval_metrics = {}
     for log in reversed(trainer.state.log_history):
         if "eval_f1_macro" in log or "eval_accuracy" in log:
             eval_metrics = log
             break
 
-    acc   = float(eval_metrics.get("eval_accuracy", 0.0))
-    f1    = float(eval_metrics.get("eval_f1_macro", 0.0))
-    kappa = float(eval_metrics.get("eval_kappa",    0.0))
+    if eval_metrics:
+        acc   = float(eval_metrics.get("eval_accuracy", 0.0))
+        f1    = float(eval_metrics.get("eval_f1_macro", 0.0))
+        kappa = float(eval_metrics.get("eval_kappa",    0.0))
+        eval_loss = float(eval_metrics.get("eval_loss", 0.0))
+    else:
+        # 2순위: eval_loss + train mean_token_accuracy
+        acc = f1 = kappa = 0.0
+        eval_loss = 0.0
+        for log in reversed(trainer.state.log_history):
+            if "eval_loss" in log:
+                eval_loss = float(log["eval_loss"])
+                break
+
+        # train 지표에서 최종 mean_token_accuracy 추출 (참고용)
+        train_acc = 0.0
+        train_loss = 0.0
+        for log in reversed(trainer.state.log_history):
+            if "mean_token_accuracy" in log:
+                train_acc  = float(log["mean_token_accuracy"])
+                train_loss = float(log.get("loss", 0.0))
+                break
 
     sep = "─" * 46
     print(f"\n{sep}")
     print(f"  {experiment_name} — 최종 평가 결과")
     print(sep)
-    print(f"  Accuracy       : {acc:.4f}")
-    print(f"  Macro F1-Score : {f1:.4f}")
-    print(f"  Cohen's Kappa  : {kappa:.4f}")
+
+    if f1 > 0 or acc > 0:
+        print(f"  Accuracy       : {acc:.4f}")
+        print(f"  Macro F1-Score : {f1:.4f}")
+        print(f"  Cohen\'s Kappa  : {kappa:.4f}")
+        print(f"  Eval Loss      : {eval_loss:.4f}")
+    else:
+        # prediction_loss_only=True 모드: loss/token accuracy만 출력
+        print(f"  Eval Loss           : {eval_loss:.4f}")
+        if "train_acc" in dir():
+            print(f"  Train Token Acc     : {train_acc:.4f}  (참고용)")
+            print(f"  Train Loss (최종)   : {train_loss:.4f}")
+        print()
+        print("  ※ compute_metrics 미실행 (prediction_loss_only=True)")
+        print("  ※ F1/Kappa는 eval_strategy 변경 후 재실행 시 측정 가능")
 
     return {
         "experiment":   experiment_name,
         "accuracy":     acc,
         "f1_macro":     f1,
         "kappa":        kappa,
+        "eval_loss":    eval_loss,
         "per_class_f1": {},
         "invalid":      0,
     }
