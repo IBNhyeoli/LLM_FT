@@ -273,39 +273,27 @@ def run_experiment(
     compute_metrics = make_compute_metrics(tokenizer)
     output_dir      = training_args.output_dir
 
-    # ── TRL 버전 호환 SFTTrainer 초기화 ──────────────────────────
-    # TRL 1.1.0+: tokenizer → processing_class, max_seq_length 제거
-    #             대신 TrainingArguments에 max_length 설정
-    # TRL 0.x   : tokenizer, max_seq_length 파라미터 사용
-    import inspect as _inspect
-    _sft_params = _inspect.signature(SFTTrainer.__init__).parameters
+    # ── TRL 1.1.0 + transformers 5.x 기준 SFTTrainer 초기화 ──────
+    # formatting_func 으로 데이터를 전달하고
+    # processing_class 로 토크나이저를 전달하는 방식 사용
+    tokenizer.model_max_length = TRAIN_DEFAULTS["max_seq_length"]
 
-    if "processing_class" in _sft_params:
-        # TRL 1.1.0 이상
-        # max_seq_length는 data_collator로 제어하거나 tokenizer에서 설정
-        tokenizer.model_max_length = TRAIN_DEFAULTS["max_seq_length"]
-        trainer = SFTTrainer(
-            model             = model,
-            train_dataset     = datasets["train"],
-            eval_dataset      = datasets["eval"],
-            processing_class  = tokenizer,
-            args              = training_args,
-            compute_metrics   = compute_metrics,
-            callbacks         = [ProgressCallback(peft_name)],
-        )
-    else:
-        # TRL 0.x
-        trainer = SFTTrainer(
-            model              = model,
-            train_dataset      = datasets["train"],
-            eval_dataset       = datasets["eval"],
-            max_seq_length     = TRAIN_DEFAULTS["max_seq_length"],
-            tokenizer          = tokenizer,
-            dataset_text_field = "text",
-            args               = training_args,
-            compute_metrics    = compute_metrics,
-            callbacks          = [ProgressCallback(peft_name)],
-        )
+    def formatting_func(example):
+        """Dataset의 'text' 컬럼을 그대로 반환"""
+        if isinstance(example["text"], list):
+            return example["text"]
+        return [example["text"]]
+
+    trainer = SFTTrainer(
+        model            = model,
+        train_dataset    = datasets["train"],
+        eval_dataset     = datasets["eval"],
+        processing_class = tokenizer,
+        formatting_func  = formatting_func,
+        args             = training_args,
+        compute_metrics  = compute_metrics,
+        callbacks        = [ProgressCallback(peft_name)],
+    )
 
     trainer.train()
 
