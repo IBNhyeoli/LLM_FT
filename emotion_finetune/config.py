@@ -112,7 +112,7 @@ print(f"[config] 출력 디렉터리: {OUTPUT_ROOT}")
 # 모델
 # ══════════════════════════════════════════════════════════════
 
-MODEL_ID = "LGAI-EXAONE/EXAONE-3.5-2.8B-Instruct"
+MODEL_ID = "LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct"
 
 
 # ══════════════════════════════════════════════════════════════
